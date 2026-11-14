@@ -6,10 +6,11 @@ import { Duplex } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import ssh2 from 'ssh2';
 import type { Client as SshClient, ClientChannel } from 'ssh2';
+import { constants } from 'node:os';
 import { SandboxError } from '@opencoredev/sandbox-sdk';
 import type { ExecInput, ExecResult, WriteOptions } from '@opencoredev/sandbox-sdk/provider';
 import { z } from 'zod';
-import type { GuestTransport, RemoteFiles, SshAccess } from './contracts.js';
+import type { GuestTransport, RemoteFiles, ShellInput, SshAccess } from './contracts.js';
 const { Client, utils } = ssh2;
 
 
@@ -199,7 +200,73 @@ export function createTransport(access: SshAccess): GuestTransport {
   };
 
   return {
+    scratchDirectory: access.scratchDirectory,
     files,
+    async shell(input: ShellInput): Promise<number> {
+      if (closed) throw error('SSH transport is closed', 'unavailable');
+      if (input.signal?.aborted) return 130;
+      const result = Promise.withResolvers<number>();
+      const id = randomBytes(16).toString('hex');
+      let channel: ClientChannel | undefined;
+      let resize: (() => void) | undefined;
+      let exitCode: number | undefined;
+      let settled = false;
+      function finish(code?: number, cause?: Error) {
+        if (settled) return;
+        settled = true;
+        input.signal?.removeEventListener('abort', abort);
+        input.stdin.removeListener('error', ioFailure);
+        input.stdout.removeListener('error', ioFailure);
+        input.stderr.removeListener('error', ioFailure);
+        if (resize) input.stdout.removeListener('resize', resize);
+        if (channel) {
+          input.stdin.unpipe(channel);
+          channel.unpipe(input.stdout);
+          channel.stderr.unpipe(input.stderr);
+        }
+        operations.delete(id);
+        if (cause) result.reject(cause);
+        else if (code !== undefined) result.resolve(code);
+        else result.reject(error('SSH shell closed without a confirmed exit status', 'outcome_unknown', lost));
+      }
+      const abort = () => { channel?.close(); finish(130); };
+      const ioFailure = (cause: Error) => { channel?.close(); finish(undefined, cause); };
+      operations.set(id, { stop: abort, settled: result.promise.then(() => {}, () => {}) });
+      input.signal?.addEventListener('abort', abort, { once: true });
+      input.stdin.on('error', ioFailure);
+      input.stdout.on('error', ioFailure);
+      input.stderr.on('error', ioFailure);
+      if (input.signal?.aborted) abort();
+      try {
+        // Cancellation also races connection setup so raw terminal state is restored
+        // without waiting for a dead relay's authentication deadline.
+        const client = await Promise.race([getClient(), result.promise.then(() => undefined)]);
+        if (!client || settled) return result.promise;
+        client.shell({ term: input.term ?? 'xterm-256color', cols: input.stdout.columns ?? 80, rows: input.stdout.rows ?? 24 }, (cause, stream) => {
+          if (cause) { finish(undefined, error('SSH shell request failed', 'unavailable', cause)); return; }
+          channel = stream;
+          if (settled) { stream.close(); return; }
+          resize = () => stream.setWindow(input.stdout.rows ?? 24, input.stdout.columns ?? 80, 0, 0);
+          input.stdout.on('resize', resize);
+          input.stdin.pipe(stream);
+          stream.pipe(input.stdout, { end: false });
+          stream.stderr.pipe(input.stderr, { end: false });
+          stream.on('exit', (code: number | null, signal?: string) => {
+            if (code !== null) exitCode = code;
+            else if (signal) {
+              const name = signal.startsWith('SIG') ? signal : `SIG${signal}`;
+              const number = Object.entries(constants.signals).find(([key]) => key === name)?.[1];
+              if (number !== undefined) exitCode = 128 + number;
+            }
+          });
+          stream.once('error', (failure: Error) => finish(undefined, error('SSH shell channel failed', 'outcome_unknown', failure)));
+          stream.once('close', () => finish(exitCode));
+        });
+      } catch (cause) {
+        finish(undefined, cause instanceof Error ? cause : error('SSH shell connection failed', 'unavailable'));
+      }
+      return result.promise;
+    },
     async exec(input: ExecInput): Promise<ExecResult> {
       if (closed) throw error('SSH transport is closed', 'unavailable');
       if (input.signal?.aborted) return { exitCode: null, timedOut: false };

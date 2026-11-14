@@ -35,6 +35,36 @@ export async function startSshd({ directory } = {}) {
     });
     client.on('ready', () => client.on('session', (accept) => {
       const session = accept();
+      let hasPty = false;
+      let ptyRows = 24;
+      let ptyColumns = 80;
+      let ptyTerm = 'vt100';
+      session.on('pty', (acceptPty, _rejectPty, info) => {
+        hasPty = true;
+        ptyRows = info.rows;
+        ptyColumns = info.cols;
+        ptyTerm = info.term;
+        acceptPty();
+      });
+      session.on('shell', (acceptShell) => {
+        if (!hasPty) return;
+        const channel = acceptShell();
+        const child = spawn('/usr/bin/script', ['-qefc', `stty rows ${ptyRows} cols ${ptyColumns}; exec /bin/bash --noprofile --norc -i`, '/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, TERM: ptyTerm } });
+        children.add(child);
+        channel.pipe(child.stdin);
+        child.stdout.pipe(channel, { end: false });
+        child.stderr.pipe(channel.stderr, { end: false });
+        child.stdin.on('error', () => {});
+        channel.on('error', () => {});
+        channel.once('close', () => { if (child.exitCode === null) child.kill('SIGHUP'); });
+        child.once('error', () => { channel.exit(1); channel.end(); });
+        child.once('close', (code, signal) => {
+          children.delete(child);
+          if (signal) channel.exit(signal);
+          else channel.exit(code ?? 1);
+          channel.end();
+        });
+      });
       session.on('exec', (acceptExec, _reject, info) => {
         const channel = acceptExec();
         const child = spawn('/bin/bash', ['-lc', info.command], { stdio: ['pipe', 'pipe', 'pipe'] });

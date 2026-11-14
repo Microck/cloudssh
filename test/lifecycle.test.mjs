@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdtemp, rm, stat } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -100,5 +100,32 @@ test('exposed journals are rejected rather than trusting their ownership metadat
   await chmod(file, 0o644);
   await assert.rejects(lifecycle.get(created.id), /private regular file/);
   await chmod(file, 0o600);
+  await lifecycle.destroy(created.id);
+});
+
+test('explicit resume refuses a replacement runtime and retains the prior access window', async (t) => {
+  const { options, lifecycle } = await setup(t, 'resume-changed-runtime');
+  const created = await lifecycle.create({ labels: { owner: 'isolated-resume' }, timeoutMs: 28_800_000 });
+  const sessionFile = path.join(lifecycle.sessionDirectory(created.id), 'session.json');
+  const saved = JSON.parse(await readFile(sessionFile, 'utf8'));
+  saved.vms[0].agentDeadline = '2000-01-01T00:00:00Z';
+  await writeFile(sessionFile, JSON.stringify(saved));
+  await assert.rejects(lifecycle.resume(created.id, { timeoutMs: 60_000 }), { code: 'outcome_unknown' });
+  const retained = await lifecycle.get(created.id);
+  assert.equal(retained.timeoutMs, created.timeoutMs);
+  assert.equal(retained.createdAt, created.createdAt);
+  assert.deepEqual(retained.labels, created.labels);
+  await assert.rejects(access(path.join(options.stateDirectory, created.id, '.ssh-lease')), { code: 'ENOENT' });
+  await lifecycle.destroy(created.id);
+});
+
+test('busy sessions and rejected recovery cannot change the access deadline', async (t) => {
+  const { lifecycle } = await setup(t, 'resume-denied');
+  const created = await lifecycle.create({ labels: {} });
+  const release = await lifecycle.acquire(created.id);
+  await assert.rejects(lifecycle.resume(created.id, { timeoutMs: 60_000 }), /busy|lease/);
+  await release();
+  await assert.rejects(lifecycle.resume(created.id, { timeoutMs: 60_000 }), /approval denied/);
+  assert.equal((await lifecycle.get(created.id)).timeoutMs, created.timeoutMs);
   await lifecycle.destroy(created.id);
 });

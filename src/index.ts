@@ -1,18 +1,25 @@
 import { SandboxError } from '@opencoredev/sandbox-sdk';
 import type { Labels, Provider, SandboxInfo } from '@opencoredev/sandbox-sdk/provider';
 import { z } from 'zod';
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { jobOperations, interruptRetained } from './jobs.js';
 import { createLifecycle } from './lifecycle.js';
 import { createTransport } from './ssh.js';
 import { worksshOptionsSchema } from './contracts.js';
-import type { GuestTransport, SandboxRecord, WorksshNative, WorksshOptions } from './contracts.js';
+import type { GuestTransport, ReconnectInput, SandboxRecord, WorksshNative, WorksshOptions } from './contracts.js';
 
-export type { WorksshOptions, WorksshNative } from './contracts.js';
+export type { WorksshOptions, WorksshNative, ReconnectInput } from './contracts.js';
 
-export type WorksshProvider = Provider<WorksshNative, never>;
+export type WorksshProvider = Provider<WorksshNative, never> & {
+  guest(id: string): Promise<GuestTransport>;
+  close(id: string): Promise<void>;
+  reconnect(id: string, input: ReconnectInput): Promise<SandboxInfo>;
+};
 
 const name = 'workssh';
 
-function failure(message: string, code: 'not_found' | 'unsupported' | 'outcome_unknown', id?: string) {
+function failure(message: string, code: 'not_found' | 'unsupported' | 'outcome_unknown' | 'provider', id?: string) {
   return new SandboxError(message, { code, provider: name, sandboxId: id });
 }
 
@@ -21,7 +28,7 @@ function usable(record: SandboxRecord) {
     throw failure(`Session is ${record.phase}; inspect or destroy it before retrying creation`, 'outcome_unknown', record.id);
   }
   if (Date.now() >= record.createdAt + record.timeoutMs) {
-    throw failure('The declared agent lifetime has elapsed. Destroy this session; it is not a VM deletion guarantee', 'not_found', record.id);
+    throw failure('SSH access expired, not a missing VM. Reconnect explicitly with provider.reconnect(id, { timeoutMs }) or raft resume BOX --ttl SECONDS; no replacement is allocated', 'provider', record.id);
   }
 }
 
@@ -89,6 +96,20 @@ export function workssh(options: WorksshOptions): WorksshProvider {
       await attached.release();
     }
   }
+  async function collectJobs(id: string) {
+    const directory = join(settings.stateDirectory, id, 'jobs');
+    let names: string[];
+    try { names = await readdir(directory); }
+    catch (cause) {
+      if (z.object({ code: z.literal('ENOENT') }).safeParse(cause).success) return;
+      throw cause;
+    }
+    if (names.length === 0) return;
+    const record = await lifecycle.get(id);
+    const location = z.string().parse(record.labels['raft.location']);
+    await jobOperations(await guest(id), record, directory, `${location}:${id}`).finish();
+  }
+
 
   return {
     name,
@@ -100,6 +121,10 @@ export function workssh(options: WorksshOptions): WorksshProvider {
     async create(input) {
       const record = await lifecycle.create(input);
       return remember(record);
+    },
+    async reconnect(id, input) {
+      await close(id);
+      return remember(await lifecycle.resume(id, input));
     },
     async find(key) {
       const record = await lifecycle.find(key);
@@ -120,13 +145,26 @@ export function workssh(options: WorksshOptions): WorksshProvider {
       return found;
     },
     async destroy(id) {
+      const record = await lifecycle.get(id);
+      let collectionError: unknown;
+      if (record.phase !== 'deleted') {
+        try { await collectJobs(id); }
+        catch (cause) { collectionError = cause; }
+      }
       try {
         await close(id);
       } finally {
-        // Cloud revocation must still run if a broken SSH connection could not close cleanly.
+        // Confirm cloud revocation even if SSH or pre-deletion log collection failed.
         await lifecycle.destroy(id);
+        if (record.labels['raft.location']) {
+          await interruptRetained(join(settings.stateDirectory, id, 'jobs'), `${record.labels['raft.location']}:${id}`);
+        }
         records.delete(id);
       }
+      if (collectionError) throw new SandboxError('Cloud resources were deleted, but detached-job output collection failed', {
+        code: 'provider', provider: name, sandboxId: id,
+        cause: collectionError instanceof Error ? collectionError.message : undefined,
+      });
     },
     async exec(id, input) {
       if (input.signal?.aborted) return { exitCode: null, timedOut: false };
@@ -153,6 +191,7 @@ export function workssh(options: WorksshOptions): WorksshProvider {
       if (!record) throw failure('Connect the sandbox before requesting native metadata', 'not_found', id);
       return { id, sessionDirectory: lifecycle.sessionDirectory(id), phase: record.phase };
     },
+    guest,
     close,
   };
 }

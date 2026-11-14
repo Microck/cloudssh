@@ -49,13 +49,22 @@ if (args[0] === 'up') {
   } else {
     await mkdir(fixture.scratchDirectory, { recursive: true, mode: 0o700 });
     state.phase = fixture.mode === 'bad' ? 'failed' : 'ready';
-    state.vms = [{ index: 1, hostPublicKey: fixture.hostPublicKey, scratch: fixture.scratchDirectory, offline: false }];
+    state.vms = [{ index: 1, runtimeId: 'fixture-runtime', agentDeadline: new Date(Number(args[args.indexOf('--agent-deadline') + 1])).toISOString(), hostPublicKey: fixture.hostPublicKey, scratch: fixture.scratchDirectory, offline: false }];
     await save('session.json', state);
     await writeFile(path.join(directory, 'client_key'), fixture.privateKey, { mode: 0o600 });
     await save('vm-1.json', { workerUrl: 'https://fixture.invalid', relayToken: state.relayToken, tunnelId: '0'.repeat(32), transport: 'websocket' });
     await rm(path.join(directory, '.lock'), { recursive: true });
     process.stdout.write(JSON.stringify({ phase: state.phase, count: 1, vms: [{ index: 1, ready: state.phase === 'ready', offline: false }] }));
   }
+} else if (args[0] === 'resume') {
+  const state = JSON.parse(await readFile(file, 'utf8'));
+  if (state.closed || state.phase !== 'ready') throw new Error('Cannot resume deleted fixture');
+  if (fixture.mode === 'resume-denied') throw new Error('Fixture recovery approval denied');
+  const vm = state.vms[0];
+  if (Date.parse(vm.agentDeadline) <= Date.now()) vm.agentDeadline = new Date(Number(args[args.indexOf('--agent-deadline') + 1])).toISOString();
+  if (fixture.mode === 'resume-changed-runtime') vm.runtimeId = 'replacement-runtime';
+  await save('session.json', state);
+  process.stdout.write(JSON.stringify({ phase: state.phase, count: 1, vms: [{ index: 1, ready: true, offline: false }] }));
 } else if (args[0] === 'down') {
   const state = JSON.parse(await readFile(file, 'utf8'));
   state.phase = 'deleted'; state.closed = true;

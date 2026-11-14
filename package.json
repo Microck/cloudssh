@@ -22,10 +22,11 @@
     "docs"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/guest.py dist/guest.py",
+    "build": "tsc -p tsconfig.json && cp src/guest.py src/jobs.py src/host.py dist/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint",
     "test": "node --test test/*.test.mjs",
+    "test:raft": "node --test test/raft-integration.mjs",
     "check": "npm run build && npm run lint && npm test"
   },
   "dependencies": {

@@ -7,6 +7,7 @@ import { SandboxError } from '@opencoredev/sandbox-sdk';
 import type { ErrorCode } from '@opencoredev/sandbox-sdk';
 import type { CreateInput } from '@opencoredev/sandbox-sdk/provider';
 import { z } from 'zod';
+import { accessTimeoutSchema } from './contracts.js';
 import type { Lifecycle, SandboxRecord, SshAccess, WorksshOptions } from './contracts.js';
 
 const idSchema = z.string().regex(/^[a-f0-9]{32}$/);
@@ -16,13 +17,22 @@ const recordSchema = z.object({
   createdAt: z.number().finite(), timeoutMs: z.number().finite(),
   phase: z.enum(['creating', 'ready', 'failed', 'deleting', 'deleted']), helperPid: z.number().int().positive().optional(),
 }).strict();
+const sessionVmSchema = z.object({ index: z.literal(1), hostPublicKey: z.string().optional(), runtimeId: z.string().optional(), agentDeadline: z.string().optional(), offline: z.boolean().optional(), scratch: z.string() }).passthrough();
 const sessionSchema = z.object({
   version: z.literal(1), phase: z.string(), closed: z.boolean().optional(), count: z.literal(1),
   configId: z.string().optional(), configDeleted: z.boolean().optional(),
   vaultId: z.string().optional(), vaultDeleted: z.boolean().optional(),
   workerOwned: z.boolean().optional(), workerDeleted: z.boolean().optional(), relayToken: z.string().optional(),
-  vms: z.array(z.object({ index: z.literal(1), hostPublicKey: z.string().optional(), offline: z.boolean().optional(), scratch: z.string() }).passthrough()),
+  vms: z.array(sessionVmSchema),
 }).passthrough();
+const readySessionSchema = sessionSchema.extend({
+  phase: z.literal('ready'), closed: z.literal(false).optional(),
+  configDeleted: z.literal(false).optional(), vaultDeleted: z.literal(false).optional(), workerDeleted: z.literal(false).optional(),
+  vms: z.tuple([sessionVmSchema.extend({
+    hostPublicKey: z.string().min(1), runtimeId: z.string().min(1),
+    agentDeadline: z.iso.datetime({ offset: true }), offline: z.literal(false).optional(),
+  })]),
+});
 const outputSchema = z.object({ phase: z.string(), count: z.literal(1), vms: z.array(z.object({ index: z.literal(1), ready: z.boolean(), offline: z.boolean() }).passthrough()) }).passthrough();
 const vmConfigSchema = z.object({ workerUrl: z.url().startsWith('https://'), relayToken: z.string().min(32), tunnelId: z.string().regex(/^[a-f0-9]{32}$/), transport: z.literal('websocket') }).strict();
 const leaseSchema = z.object({ pid: z.number().int().positive(), token: idSchema }).strict();
@@ -40,6 +50,12 @@ function failure(message: string, code: ErrorCode, sandboxId?: string, cause?: u
     cause: cause instanceof Error ? cause.message : undefined,
     hint: code === 'outcome_unknown' ? 'Inspect the retained sandbox ID and destroy it before creating a replacement.' : undefined,
   });
+}
+
+function accessTimeout(value: number) {
+  const parsed = accessTimeoutSchema.safeParse(value);
+  if (!parsed.success) throw failure('timeoutMs must be integer milliseconds from 60000 through 2592000000', 'invalid_argument');
+  return parsed.data;
 }
 
 async function privateDirectory(directory: string, create = false) {
@@ -140,10 +156,10 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
     throw failure('The recorded helper is still running; no lock was removed', 'outcome_unknown', id);
   }
 
-  async function invoke(id: string, action: 'up' | 'down', extra: string[], signal?: AbortSignal) {
+  async function invoke(id: string, action: 'up' | 'resume' | 'down', extra: string[], signal?: AbortSignal) {
     if (signal?.aborted) throw failure('Operation was aborted before helper start', 'aborted', id);
     // Up must create this directory itself. Precreating it makes the helper refuse creation.
-    if (action === 'down') await privateDirectory(sessionDirectory(id));
+    if (action !== 'up') await privateDirectory(sessionDirectory(id));
     const args = [helper, action, '--state-dir', sessionDirectory(id), '--json', ...extra];
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     const exit = Promise.withResolvers<{ code: number | null; cause?: Error }>();
@@ -178,7 +194,7 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
         throw failure(timedOut ? 'Helper deadline exceeded; remote outcome is unknown' : 'Helper was interrupted; remote outcome is unknown', 'outcome_unknown', id);
       }
       if (outcome.value.cause || outcome.value.code !== 0) {
-        const code = stderr.includes('Included Codex allowance is exhausted') ? 'quota' : action === 'up' ? 'outcome_unknown' : 'provider';
+        const code = stderr.includes('Included Codex allowance is exhausted') ? 'quota' : action === 'down' ? 'provider' : 'outcome_unknown';
         throw failure(`Helper ${action} did not complete${stderr.trim() ? `: ${stderr.trim()}` : ''}`, code, id, outcome.value.cause);
       }
       try { return outputSchema.parse(JSON.parse(stdout)); }
@@ -205,8 +221,7 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
     async create(input: CreateInput) {
       if (input.signal?.aborted) throw failure('Create was aborted before state was written', 'aborted');
       if (input.size !== undefined || input.from !== undefined || input.ports !== undefined || input.idleTimeoutMs !== undefined || (input.network !== undefined && input.network !== 'all')) throw failure('WorkSSH does not support resizing, snapshots, ports, idle expiry or restrictive network policy', 'unsupported');
-      const timeoutMs = input.timeoutMs ?? 600_000;
-      if (!Number.isFinite(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 7_200_000) throw failure('timeoutMs must be 60000..7200000', 'invalid_argument');
+      const timeoutMs = accessTimeout(input.timeoutMs ?? 600_000);
       const env = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).parse(input.env ?? {});
       const labels = z.record(z.string(), z.string()).parse(input.labels);
       if (input.key !== undefined) z.string().min(1).parse(input.key);
@@ -216,11 +231,11 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
       await save(record);
       const release = await acquire(record.id);
       try {
-        const args = [...helperCredentials(), '--count', '1', '--lifetime-minutes', String(Math.ceil(timeoutMs / 60_000)), '--model', options.model ?? 'gpt-6-luna'];
+        const args = [...helperCredentials(), '--count', '1', '--agent-deadline', String(record.createdAt + timeoutMs), '--model', options.model ?? 'gpt-6-luna'];
         if (options.allowCredits === true) args.push('--allow-credits');
         const output = await invoke(record.id, 'up', args, input.signal);
-        const saved = await session(record.id);
-        if (output.phase !== 'ready' || output.vms.length !== 1 || !output.vms[0]?.ready || output.vms[0].offline || saved.phase !== 'ready' || saved.closed || saved.vms.length !== 1 || !saved.vms[0]?.hostPublicKey || saved.vms[0].offline) throw failure('Helper did not confirm one ready VM with an independent host pin', 'outcome_unknown', record.id);
+        const saved = readySessionSchema.safeParse(await session(record.id));
+        if (output.phase !== 'ready' || output.vms.length !== 1 || !output.vms[0]?.ready || output.vms[0].offline || !saved.success || Date.parse(saved.data.vms[0].agentDeadline) !== record.createdAt + timeoutMs) throw failure('Helper did not confirm one ready pinned VM with the requested access deadline', 'outcome_unknown', record.id);
         record.phase = 'ready';
         await save(record);
         return record;
@@ -229,6 +244,34 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
         await save({ ...current, phase: 'failed' });
         if (cause instanceof SandboxError) throw cause;
         throw failure('Creation failed; retained its ID for inspection and destruction', 'outcome_unknown', record.id, cause);
+      } finally { await release(); }
+    },
+    async resume(id, input) {
+      const timeoutMs = accessTimeout(input.timeoutMs);
+      if (input.signal?.aborted) throw failure('Resume was aborted before helper start', 'aborted', id);
+      const release = await acquire(id);
+      try {
+        const record = await get(id);
+        if (record.phase !== 'ready') throw failure(`Cannot resume a ${record.phase} session; inspect its retained state`, 'provider', id);
+        const before = readySessionSchema.safeParse(await session(id));
+        if (!before.success) throw failure('Session teardown or incomplete setup prevents access recovery', 'provider', id);
+        const original = before.data.vms[0];
+        await clearOwnedDeadLock(id, record);
+        const requestedDeadline = Date.now() + timeoutMs;
+        const args = [...helperCredentials(), '--agent-deadline', String(requestedDeadline)];
+        if (options.allowCredits === true) args.push('--allow-credits');
+        const output = await invoke(id, 'resume', args, input.signal);
+        const saved = readySessionSchema.safeParse(await session(id));
+        if (output.phase !== 'ready' || output.vms.length !== 1 || !output.vms[0]?.ready || output.vms[0].offline || !saved.success) throw failure('Recovery did not confirm one ready pinned VM; prior deadline retained', 'outcome_unknown', id);
+        const vm = saved.data.vms[0];
+        const deadline = Date.parse(vm.agentDeadline);
+        if (vm.runtimeId !== original.runtimeId || vm.hostPublicKey.trim().split(/\s+/).slice(0, 2).join(' ') !== original.hostPublicKey.trim().split(/\s+/).slice(0, 2).join(' ')) throw failure('Recovery changed the runtime or host pin; prior deadline retained', 'outcome_unknown', id);
+        if (deadline <= Date.now() || deadline > requestedDeadline) throw failure('Recovery did not confirm a bounded access deadline; prior deadline retained', 'outcome_unknown', id);
+        // A live supervisor may be reused. Its confirmed deadline, not the request,
+        // determines access; creation time, labels and environment stay unchanged.
+        record.timeoutMs = deadline - record.createdAt;
+        await save(record);
+        return record;
       } finally { await release(); }
     },
     get,

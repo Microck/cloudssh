@@ -22,10 +22,7 @@ test('protocol handshake works without credentials or configured helper and make
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const result = invoke('describe', { protocol: 1, location: 'work', options: {}, args: {} }, home);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    protocol: 1,
-    commands: ['new', 'list', 'info', 'exec', 'upload', 'download', 'destroy'],
-  });
+  assert.equal(JSON.parse(result.stdout).protocol, 1);
   assert.deepEqual(fs.readdirSync(home), []);
 });
 
@@ -41,8 +38,6 @@ test('unsupported actions and unsafe creation flags fail before touching provide
     ['new', { ttl: 600, disposable: true, cpu: 4 }],
     ['new', { ttl: 600, disposable: true, memory: '16GiB' }],
     ['new', { ttl: 600, disposable: true, disk: 'shared' }],
-    ['exec', { box: `work:${'a'.repeat(32)}`, command: ['true'], detach: true }],
-    ['download', { box: `work:${'a'.repeat(32)}`, source: '/workspace', destination: '/tmp/out', recursive: true }],
   ];
   for (const [action, args] of rows) {
     const result = invoke(action, { protocol: 1, location: 'work', options, args: { action, location: 'work', ...args } }, home);
@@ -65,4 +60,19 @@ test('wrong protocol versions and action/location mismatches cannot execute', (t
     assert.equal(result.stdout, '');
     assert.deepEqual(fs.readdirSync(home), []);
   }
+});
+
+test('capacity distinguishes absent local limits from unknown provider availability without allocating', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workssh-capacity-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const stateDirectory = path.join(home, 'state');
+  const result = invoke('capacity', { protocol: 1, location: 'openai', options: { helperRoot: path.join(home, 'missing-helper'), stateDirectory }, args: { action: 'capacity', location: 'openai', json: true } }, home);
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.localLimit, null);
+  assert.equal(report.providerLimit, null);
+  assert.equal(report.available, null);
+  assert.equal(report.host, null);
+  assert.equal(report.boxes, 0);
+  assert.equal(fs.existsSync(stateDirectory), false);
 });

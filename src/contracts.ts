@@ -1,3 +1,4 @@
+import type { Readable, Writable } from 'node:stream';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import type { CreateInput, ExecInput, ExecResult, FileInfo, Labels, WriteOptions } from '@opencoredev/sandbox-sdk/provider';
@@ -17,6 +18,13 @@ export const worksshOptionsSchema = z.object({
 }).strict();
 
 export type WorksshOptions = z.infer<typeof worksshOptionsSchema>;
+
+/** Caller-authorized access window; matches Raft's 60-second to 30-day range. */
+export const accessTimeoutSchema = z.number().int().min(60_000).max(2_592_000_000);
+export interface ReconnectInput {
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
 
 export interface SandboxRecord {
   version: 1;
@@ -47,6 +55,7 @@ export interface WorksshNative {
 
 export interface Lifecycle {
   create(input: CreateInput): Promise<SandboxRecord>;
+  resume(id: string, input: ReconnectInput): Promise<SandboxRecord>;
   get(id: string): Promise<SandboxRecord>;
   list(): Promise<SandboxRecord[]>;
   find(key: string): Promise<SandboxRecord | undefined>;
@@ -65,8 +74,20 @@ export interface RemoteFiles {
   mkdir(path: string): Promise<void>;
 }
 
+export interface ShellInput {
+  stdin: Readable;
+  stdout: Writable & { columns?: number; rows?: number };
+  stderr: Writable;
+  signal?: AbortSignal;
+  term?: string;
+}
+
 export interface GuestTransport {
   exec(input: ExecInput): Promise<ExecResult>;
   files: RemoteFiles;
+  /** Authenticated interactive shell over the transport's pinned SSH connection. */
+  shell(input: ShellInput): Promise<number>;
+  readonly scratchDirectory: string;
   close(): Promise<void>;
 }
+

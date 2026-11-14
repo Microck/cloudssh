@@ -1,3 +1,4 @@
+import { PassThrough } from 'node:stream';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -33,6 +34,21 @@ async function run(transport, directory, command) {
   return stdout;
 }
 
+
+test('runs an interactive command through an authenticated PTY and preserves its exit code', async (t) => {
+  const { transport } = await setup(t);
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  stdout.columns = 97;
+  stdout.rows = 31;
+  let output = '';
+  stdout.on('data', (chunk) => { output += chunk.toString(); });
+  const shell = transport.shell({ stdin, stdout, stderr, term: 'xterm-test' });
+  stdin.end("printf 'WORKSSH_PTY_READY:%s:%s\\n' \"$TERM\" \"$(stty size)\"; exit 7\n");
+  assert.equal(await shell, 7);
+  assert.match(output, /WORKSSH_PTY_READY:xterm-test:31 97/);
+});
 test('binary replacement is atomic, honors mode and removes symlinks without following their targets', async (t) => {
   const { transport, directory } = await setup(t);
   const remote = join(directory, 'files');
