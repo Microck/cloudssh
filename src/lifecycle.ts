@@ -19,7 +19,7 @@ const recordSchema = z.object({
   phase: z.enum(['creating', 'ready', 'failed', 'deleting', 'deleted']), helperPid: z.number().int().positive().optional(),
   keepAlive: z.boolean().optional(),
 }).strict();
-const sessionVmSchema = z.object({ index: z.literal(1), hostPublicKey: z.string().optional(), runtimeId: z.string().optional(), agentDeadline: z.string().optional(), offline: z.boolean().optional(), scratch: z.string() }).passthrough();
+const sessionVmSchema = z.object({ index: z.literal(1), threadId: z.string().optional(), hostPublicKey: z.string().optional(), runtimeId: z.string().optional(), agentDeadline: z.string().optional(), offline: z.boolean().optional(), scratch: z.string() }).passthrough();
 const sessionSchema = z.object({
   version: z.literal(1), phase: z.string(), closed: z.boolean().optional(), count: z.literal(1),
   configId: z.string().optional(), configDeleted: z.boolean().optional(),
@@ -369,7 +369,9 @@ export function createLifecycle(options: CloudsshOptions): Lifecycle {
           await invoke(id, 'down', [...helperCredentials(), '--yes'], outputSchema);
           saved = await session(id);
         }
-        if (!saved.closed || saved.phase !== 'deleted' || saved.relayToken || saved.vms.some((vm) => !vm.offline) || (saved.configId && !saved.configDeleted) || (saved.vaultId && !saved.vaultDeleted) || (saved.workerOwned && !saved.workerDeleted)) throw failure('Cloud resource deletion or runtime shutdown is not confirmed; state retained', 'outcome_unknown', id);
+        // A journaled allocation intent is not a VM until an identity is assigned.
+        const unconfirmedRuntime = saved.vms.some((vm) => (vm.threadId !== undefined || vm.runtimeId !== undefined) && vm.offline !== true);
+        if (!saved.closed || saved.phase !== 'deleted' || saved.relayToken || unconfirmedRuntime || (saved.configId && !saved.configDeleted) || (saved.vaultId && !saved.vaultDeleted) || (saved.workerOwned && !saved.workerDeleted)) throw failure('Cloud resource deletion or runtime shutdown is not confirmed; state retained', 'outcome_unknown', id);
         await save({ ...record, phase: 'deleted', env: {} });
       } catch (cause) {
         if (cause instanceof SandboxError) throw cause;

@@ -61,6 +61,37 @@ test('failed readiness retains an inspectable ID and blocks an uncertain key fro
   assert.deepEqual(await lifecycle.list(), []);
 });
 
+test('failed allocation intents without an assigned identity can finish confirmed cleanup', async (t) => {
+  const { lifecycle } = await setup(t, 'allocation-failed');
+  let id;
+  await assert.rejects(lifecycle.create({ labels: {}, env: { PRIVATE_VALUE: 'fixture' } }), cause => {
+    id = cause.sandboxId;
+    return cause.code === 'outcome_unknown';
+  });
+  await lifecycle.destroy(id);
+  assert.equal((await lifecycle.get(id)).phase, 'deleted');
+  assert.deepEqual((await lifecycle.get(id)).env, {});
+  assert.deepEqual(await lifecycle.list(), []);
+  await assert.rejects(access(path.join(lifecycle.sessionDirectory(id), 'client_key')), { code: 'ENOENT' });
+});
+
+test('an assigned thread or runtime still needs offline evidence even when other cleanup flags are complete', async (t) => {
+  const { lifecycle } = await setup(t);
+  for (const identity of [{ threadId: 'unconfirmed-thread' }, { runtimeId: 'unconfirmed-runtime' }]) {
+    const created = await lifecycle.create({ labels: {} });
+    const file = path.join(lifecycle.sessionDirectory(created.id), 'session.json');
+    const saved = JSON.parse(await readFile(file, 'utf8'));
+    saved.closed = true; saved.phase = 'deleted';
+    saved.configDeleted = true; saved.vaultDeleted = true; saved.workerDeleted = true;
+    delete saved.relayToken;
+    saved.vms = [{ index: 1, scratch: saved.vms[0].scratch, offline: false, ...identity }];
+    await writeFile(file, JSON.stringify(saved));
+    await assert.rejects(lifecycle.destroy(created.id), { code: 'outcome_unknown' });
+    assert.notEqual((await lifecycle.get(created.id)).phase, 'deleted');
+    await access(path.join(lifecycle.sessionDirectory(created.id), 'client_key'));
+  }
+});
+
 test('aborted helper creation retains its journal and cleanup clears only its recorded dead lock', async (t) => {
   const { lifecycle, options } = await setup(t, 'wait');
   const controller = new AbortController();

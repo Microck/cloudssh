@@ -41,6 +41,13 @@ if (args[0] === 'up') {
   await save('session.json', state);
   await mkdir(path.join(directory, '.lock'), { mode: 0o700 });
   await writeFile(path.join(directory, '.lock/pid'), String(process.pid), { mode: 0o600 });
+  if (fixture.mode === 'allocation-failed') {
+    state.vms = [{ index: 1, scratch: fixture.scratchDirectory, allocationPending: true }];
+    await save('session.json', state);
+    await writeFile(path.join(directory, 'client_key'), fixture.privateKey, { mode: 0o600 });
+    await rm(path.join(directory, '.lock'), { recursive: true });
+    throw new Error('Fixture thread/start failed before assigning an identity');
+  }
   if (fixture.mode === 'wait') {
     await writeFile(new URL('started', root), 'waiting');
     const stopped = Promise.withResolvers();
@@ -85,13 +92,13 @@ if (args[0] === 'up') {
   state.phase = 'deleted'; state.closed = true;
   const confirmed = fixture.mode !== 'unconfirmed';
   state.workerDeleted = confirmed; state.configDeleted = confirmed; state.vaultDeleted = confirmed;
-  state.vms = state.vms.map(vm => ({ ...vm, offline: confirmed }));
+  state.vms = state.vms.map(vm => vm.runtimeId ? { ...vm, offline: confirmed } : vm);
   if (confirmed) {
     delete state.relayToken;
     for (const name of ['client_key', 'vm-1.json']) await rm(path.join(directory, name), { force: true });
   }
   await save('session.json', state);
-  process.stdout.write(JSON.stringify({ phase: 'deleted', count: 1, vms: state.vms.map(vm => ({ index: 1, ready: false, offline: vm.offline })) }));
+  process.stdout.write(JSON.stringify({ phase: 'deleted', count: 1, vms: state.vms.map(vm => ({ index: 1, ready: false, offline: vm.offline ?? false })) }));
 } else { throw new Error('Unexpected local fixture command'); }
 `, { mode: 0o600 });
   await writeFile(path.join(directory, 'proxy.mjs'), `
