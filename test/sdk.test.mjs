@@ -7,16 +7,16 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createSandbox, connectSandbox, listSandboxes } from '@opencoredev/sandbox-sdk';
-import { workssh } from '../dist/index.js';
+import { cloudssh } from '../dist/index.js';
 import { startSshd } from './fixtures/sshd.mjs';
 import { createFixtureHelper } from './fixtures/helper.mjs';
 
 async function setup(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'workssh-sdk-'));
+  const directory = await mkdtemp(join(tmpdir(), 'cloudssh-sdk-'));
   const server = await startSshd({ directory: join(directory, 'sshd') });
   const options = { helperRoot: join(directory, 'helper'), stateDirectory: join(directory, 'state') };
   await createFixtureHelper(options.helperRoot, { ...server, scratchDirectory: join(directory, 'remote-scratch') });
-  const provider = workssh(options);
+  const provider = cloudssh(options);
   let id;
   t.after(async () => {
     try { if (id) await provider.destroy(id); }
@@ -62,8 +62,8 @@ test('published SDK preserves files, environment, labels, guest exit status and 
   await box.close();
   const output = await childScript(`
 import { connectSandbox } from '@opencoredev/sandbox-sdk';
-import { workssh } from './dist/index.js';
-const provider=workssh(${JSON.stringify(options)});
+import { cloudssh } from './dist/index.js';
+const provider=cloudssh(${JSON.stringify(options)});
 const box=await connectSandbox(provider,${JSON.stringify(box.id)},{recoverSecrets:false});
 try{const result=await box.run('printf "%s" "$BASE_ENV"',{cwd:${JSON.stringify(directory)}});console.log(JSON.stringify({pid:process.pid,exit:result.exitCode,text:result.stdout}));}finally{await box.close();}
 `);

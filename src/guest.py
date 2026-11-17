@@ -53,7 +53,7 @@ def file_operation(request):
         data = base64.b64decode(request["data"], validate=True)
         if len(data) > MAX_FILE:
             raise ValueError("file exceeds 32 MiB transfer limit")
-        fd, temporary = tempfile.mkstemp(prefix=".workssh-", dir=os.path.dirname(path))
+        fd, temporary = tempfile.mkstemp(prefix=".cloudssh-", dir=os.path.dirname(path))
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)

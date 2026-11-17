@@ -24,18 +24,20 @@ export async function createFixtureHelper(root, options = {}) {
   };
   await writeFile(path.join(root, 'fixture.json'), JSON.stringify(fixture), { mode: 0o600 });
   await writeFile(path.join(directory, 'codex-cloud.mjs'), `
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 const args = process.argv.slice(2);
 const root = new URL('../../', import.meta.url);
 const fixture = JSON.parse(await readFile(new URL('fixture.json', root), 'utf8'));
+if (args.includes('--help')) { process.stdout.write('Commands: up, resume, keepalive, down\\n'); process.exit(0); }
+await appendFile(new URL('calls.jsonl', root), JSON.stringify({ action: args[0], pid: process.pid, at: Date.now() }) + '\\n', { mode: 0o600 });
 const directory = args[args.indexOf('--state-dir') + 1];
 const file = path.join(directory, 'session.json');
 const save = (name, value) => writeFile(path.join(directory, name), JSON.stringify(value), { mode: 0o600 });
 if (args[0] === 'up') {
   // Mirror the real helper's refusal to overwrite an existing session directory.
   await mkdir(directory, { mode: 0o700 });
-  const state = { version: 1, phase: 'creating', count: 1, vms: [], workerOwned: true, configId: 'fixture-config', vaultId: 'fixture-vault', relayToken: 'local-fixture-relay-token-not-a-cloud-credential' };
+  const state = { version: 1, id: 'fixture-session', phase: 'creating', count: 1, vms: [], workerOwned: true, configId: 'fixture-config', vaultId: 'fixture-vault', relayToken: 'local-fixture-relay-token-not-a-cloud-credential' };
   await save('session.json', state);
   await mkdir(path.join(directory, '.lock'), { mode: 0o700 });
   await writeFile(path.join(directory, '.lock/pid'), String(process.pid), { mode: 0o600 });
@@ -49,7 +51,7 @@ if (args[0] === 'up') {
   } else {
     await mkdir(fixture.scratchDirectory, { recursive: true, mode: 0o700 });
     state.phase = fixture.mode === 'bad' ? 'failed' : 'ready';
-    state.vms = [{ index: 1, runtimeId: 'fixture-runtime', agentDeadline: new Date(Number(args[args.indexOf('--agent-deadline') + 1])).toISOString(), hostPublicKey: fixture.hostPublicKey, scratch: fixture.scratchDirectory, offline: false }];
+    state.vms = [{ index: 1, threadId: 'fixture-thread', runtimeId: 'fixture-runtime', agentDeadline: new Date(Number(args[args.indexOf('--agent-deadline') + 1])).toISOString(), hostPublicKey: fixture.hostPublicKey, scratch: fixture.scratchDirectory, offline: false }];
     await save('session.json', state);
     await writeFile(path.join(directory, 'client_key'), fixture.privateKey, { mode: 0o600 });
     await save('vm-1.json', { workerUrl: 'https://fixture.invalid', relayToken: state.relayToken, tunnelId: '0'.repeat(32), transport: 'websocket' });
@@ -65,6 +67,19 @@ if (args[0] === 'up') {
   if (fixture.mode === 'resume-changed-runtime') vm.runtimeId = 'replacement-runtime';
   await save('session.json', state);
   process.stdout.write(JSON.stringify({ phase: state.phase, count: 1, vms: [{ index: 1, ready: true, offline: false }] }));
+} else if (args[0] === 'keepalive') {
+  if (args.some(arg => ['--cloudflare-env', '--account-id', '--allow-credits', '--agent-deadline', '--lifetime-minutes', '--model', '--count', '--yes'].includes(arg))) throw new Error('Native keepalive rejects provisioning, credit and deadline options');
+  const state = JSON.parse(await readFile(file, 'utf8'));
+  if (fixture.mode === 'keepalive-denied') throw new Error('HTTP 403: native keepalive denied');
+  if (state.closed || state.phase !== 'ready') throw new Error('Cannot maintain deleted fixture');
+  if (fixture.mode === 'keepalive-changed-runtime') {
+    state.vms[0].runtimeId = 'replacement-runtime';
+    await save('session.json', state);
+  }
+  process.stdout.write(JSON.stringify({ phase: 'ready', count: 1, resumed: true, vms: [{
+    index: 1, threadId: state.vms[0].threadId, runtimeId: state.vms[0].runtimeId, status: 'connected',
+    latestTurnId: 'fixture-completed-turn', latestTurnStatus: 'completed', latestTurnUnchanged: true,
+  }] }));
 } else if (args[0] === 'down') {
   const state = JSON.parse(await readFile(file, 'utf8'));
   state.phase = 'deleted'; state.closed = true;

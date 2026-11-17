@@ -1,6 +1,6 @@
-# WorkSSH for Sandbox SDK and Raft
+# CloudSSH for Sandbox SDK and Raft
 
-Use disposable Codex Cloud VMs through WorkSSH with [`@opencoredev/sandbox-sdk`](https://github.com/opencoredev/sandbox-sdk), or register the same provider as a [Raft executable plugin](https://github.com/Microck/raft/blob/main/docs/guides/plugins.mdx).
+Use disposable Codex Cloud VMs through CloudSSH with [`@opencoredev/sandbox-sdk`](https://github.com/opencoredev/sandbox-sdk), or register the same provider as a [Raft executable plugin](https://github.com/Microck/raft/blob/main/docs/guides/plugins.mdx).
 
 This package drives the installed [WorkSSH cloud helper](https://github.com/Microck/workssh-relay). It does not copy its provisioner, change your existing environments, bypass platform restrictions, or install a provider inside Raft.
 
@@ -10,11 +10,12 @@ This package drives the installed [WorkSSH cloud helper](https://github.com/Micr
 - An installed WorkSSH helper checkout, with both `tunnel` and `relay` locked dependencies installed. Follow its [cloud setup guide](https://github.com/Microck/workssh-relay/blob/main/docs/codex-cloud.md).
 - Your existing Codex OAuth login and Cloudflare deployment credentials. No credentials belong in source, plugin command arguments, or shared configuration.
 - Permission to consume Codex allowance and Cloudflare resources. The package never purchases credits or changes subscriptions. `allowCredits` defaults to false.
+- Optional resume-only keepalive requires a running Linux user-systemd manager and an updated helper with the native `keepalive` command. The controller host must stay online.
 - For the Raft entry point, a Raft version containing merged executable plugin protocol 1. Raft 0.7 and 0.8 do not contain it; use a release with `raft plugin` or a pinned merged-source installation.
 
 ```sh
-git clone https://github.com/Microck/sandbox-sdk-workssh.git
-cd sandbox-sdk-workssh
+git clone https://github.com/Microck/sandbox-sdk-workssh.git sandbox-sdk-cloudssh
+cd sandbox-sdk-cloudssh
 npm ci
 npm run build
 ```
@@ -27,12 +28,13 @@ The package is available from this repository. These instructions do not assume 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createSandbox, connectSandbox } from '@opencoredev/sandbox-sdk';
-import { workssh } from './dist/index.js';
+import { cloudssh } from './dist/index.js';
 
-const provider = workssh({
+const provider = cloudssh({
   helperRoot: join(homedir(), 'src/workssh-relay'),
-  stateDirectory: join(homedir(), '.local/state/sandbox-sdk-workssh'),
+  stateDirectory: join(homedir(), '.local/state/sandbox-sdk-cloudssh'),
   cloudflareEnv: join(homedir(), '.config/cloudflare/global.env'),
+  keepAlive: true, // Make native resume-only maintenance the default for new boxes.
   // Set allowCredits: true only when you consent to using existing Codex credits.
 });
 
@@ -73,27 +75,52 @@ Size selection, restrictive networking, VM pause/resume, snapshots and previews 
 | `model` | Setup model, default `gpt-6-luna`. No silent model fallback. |
 | `allowCredits` | Explicit consent to existing Codex credits when included allowance is exhausted. Default false. |
 | `operationTimeoutMs` | Helper/plugin invocation deadline, default 600000 ms. |
+| `keepAlive` | Default maintenance mode for new boxes. False unless explicitly enabled. A user-systemd service sends native resumes every two hours without model turns or deadline renewal. |
 
 Controller state includes per-sandbox SSH credentials, labels, and the creation environment. Directories are private and files are mode 0600. Registered SDK secrets still follow the SDK's output-redaction behavior; controller state itself must remain private.
+
+### Resume-only keepalive
+
+Set `keepAlive: true` once in provider options or a Raft location's `options` to make it the default for newly created boxes. It does not change existing boxes. To override the default for one SDK creation, use `labels: { 'cloudssh.keepAlive': 'false' }` or `'true'`.
+
+For an existing SDK box, use `await provider.keepAlive(box.id, true)` to enable, `await provider.keepAlive(box.id, false)` to disable, or `await provider.keepAlive(box.id)` to read its status. These operations do not use model-assisted recovery.
+
+Raft protocol 1 owns its core command flags. The plugin provides a separate management command for an existing location-qualified box:
+
+```sh
+cloudssh-raft keepalive cloudssh:BOX_ID --options /private/cloudssh-options.json --enable
+cloudssh-raft keepalive cloudssh:BOX_ID --options /private/cloudssh-options.json
+cloudssh-raft keepalive cloudssh:BOX_ID --options /private/cloudssh-options.json --disable
+```
+
+The private JSON file contains the same provider options shown below, not the surrounding Raft location object. It must be mode 0600. `raft info` and `raft list` also report keepalive status. Setting the location default controls future creations; the management command is the per-box override.
+
+Maintenance starts with a native `thread/resume`, then repeats every two hours. It runs in a box-specific user-systemd service rather than the CLI process, so `close()` and exiting the creating CLI leave it running. An attached SSH client is never displaced; its lease is reported as busy and the native resume still runs. Otherwise maintenance checks pinned SSH after each native resume.
+
+The worker stops at the existing access deadline, on identity/host-pin changes, an unexpected latest turn, RPC denial or uncertainty, or failed SSH health. It never retries an issued request, launches model work, repairs SSH, uses a paid-credit fallback, creates a replacement or extends the TTL. Explicit `reconnect`/`raft resume` remains model-assisted recovery and is separate from keepalive. Successful explicit recovery can restart maintenance within the confirmed deadline.
+
+`destroy()` stops the owned worker before deleting cloud resources. Expiry stops maintenance, **not the VM**; explicit destruction is still required. The host's user manager must remain available. This does not promise survival of a host reboot, recovery of an already-suspended guest, indefinite uptime or free usage. Shared-account balances do not establish per-request cost.
+
 
 ## Register with Raft
 
 Register the compiled entry point:
 
 ```sh
-raft plugin add openai -- node /absolute/path/to/sandbox-sdk-workssh/dist/raft.js
+raft plugin add cloudssh -- node /absolute/path/to/sandbox-sdk-cloudssh/dist/raft.js
 ```
 
 Set that location's `options` in `~/.config/raft/incus.json`. Preserve all other locations:
 
 ```json
 {
-  "openai": {
-    "plugin": ["/absolute/path/to/node", "/absolute/path/to/sandbox-sdk-workssh/dist/raft.js"],
+  "cloudssh": {
+    "plugin": ["/absolute/path/to/node", "/absolute/path/to/sandbox-sdk-cloudssh/dist/raft.js"],
     "options": {
       "helperRoot": "/absolute/path/to/workssh-relay",
-      "stateDirectory": "/absolute/private/path/to/workssh-sandboxes",
-      "cloudflareEnv": "/absolute/private/path/to/cloudflare.env"
+      "stateDirectory": "/absolute/private/path/to/cloudssh-sandboxes",
+      "cloudflareEnv": "/absolute/private/path/to/cloudflare.env",
+      "keepAlive": true
     },
     "note": "Disposable Codex Cloud VMs. Provider charges apply."
   }
@@ -102,10 +129,18 @@ Set that location's `options` in `~/.config/raft/incus.json`. Preserve all other
 
 Registration's `describe` handshake does not require credentials or allocate a sandbox. Normal actions require valid options. The package never edits your normal Raft configuration itself.
 
+To use this location for plain `raft new` commands, set it as the default:
+
 ```sh
-box=$(raft new --location openai --disposable --ttl 28800 \
+raft config set location cloudssh
+```
+
+The location's `keepAlive: true` setting applies to new boxes. Existing boxes and their access deadlines do not change.
+
+```sh
+box=$(raft new --location cloudssh --disposable --ttl 28800 \
   --purpose 'Compiler check' --owner 'Local operator' --next 'Destroy after verification')
-raft list --location openai
+raft list --location cloudssh
 raft info "$box"
 raft exec "$box" -- printf '%s\n' 'literal $argument'
 raft upload "$box" ./input.txt /workspace/input.txt
@@ -118,8 +153,8 @@ The plugin supports `new`, `resume`, `list`, `info`, `ssh`, `exec`, `upload`, `d
 `raft ssh "$box"` opens a real interactive shell and restores the controller terminal when it exits. The upstream SSH server does not apply terminal resize requests, so remote resizing is not guaranteed. Foreground `exec` accepts UTF-8 stdin up to 16 MiB; shell input and output are terminal byte streams.
 
 ```sh
-raft capacity --location openai --json
-raft doctor --location openai
+raft capacity --location cloudssh --json
+raft doctor --location cloudssh
 raft usage "$box"
 raft ssh "$box"
 job=$(raft exec --detach "$box" -- bash -lc 'make check')
@@ -128,7 +163,7 @@ raft logs "$box" "$job"
 raft cancel "$box" "$job"
 raft upload "$box" ./project /workspace/project --recursive
 raft download "$box" /workspace/project ./project-copy --recursive
-raft gc --location openai
+raft gc --location cloudssh
 ```
 
 Capacity reports no configured local VM-count limit and unknown provider capacity, remaining slots and quota. It never reports infinity or an eight-VM maximum. `usage` and `info` measure actual guest CPU/memory/filesystem counters. `list` and `doctor` probe available sessions; an unreachable, busy or expired session has unknown live state rather than a fabricated running/stopped result.

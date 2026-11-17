@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdir, lstat, readFile, readdir, rm, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
@@ -8,7 +8,8 @@ import type { ErrorCode } from '@opencoredev/sandbox-sdk';
 import type { CreateInput } from '@opencoredev/sandbox-sdk/provider';
 import { z } from 'zod';
 import { accessTimeoutSchema } from './contracts.js';
-import type { Lifecycle, SandboxRecord, SshAccess, WorksshOptions } from './contracts.js';
+import { createKeepAlive } from './keepalive.js';
+import type { KeepAliveIdentity, Lifecycle, SandboxRecord, SshAccess, CloudsshOptions } from './contracts.js';
 
 const idSchema = z.string().regex(/^[a-f0-9]{32}$/);
 const recordSchema = z.object({
@@ -16,6 +17,7 @@ const recordSchema = z.object({
   labels: z.record(z.string(), z.string()), env: z.record(z.string(), z.string()),
   createdAt: z.number().finite(), timeoutMs: z.number().finite(),
   phase: z.enum(['creating', 'ready', 'failed', 'deleting', 'deleted']), helperPid: z.number().int().positive().optional(),
+  keepAlive: z.boolean().optional(),
 }).strict();
 const sessionVmSchema = z.object({ index: z.literal(1), hostPublicKey: z.string().optional(), runtimeId: z.string().optional(), agentDeadline: z.string().optional(), offline: z.boolean().optional(), scratch: z.string() }).passthrough();
 const sessionSchema = z.object({
@@ -34,10 +36,16 @@ const readySessionSchema = sessionSchema.extend({
   })]),
 });
 const outputSchema = z.object({ phase: z.string(), count: z.literal(1), vms: z.array(z.object({ index: z.literal(1), ready: z.boolean(), offline: z.boolean() }).passthrough()) }).passthrough();
+const nativeSessionSchema = readySessionSchema.and(z.object({ id: z.string().min(1), vms: z.tuple([z.object({ threadId: z.string().min(1) })]) }));
+const keepAliveOutputSchema = z.object({
+  phase: z.literal('ready'), count: z.literal(1), resumed: z.literal(true),
+  vms: z.tuple([z.object({ index: z.literal(1), threadId: z.string(), runtimeId: z.string(), status: z.literal('connected'),
+    latestTurnId: z.string(), latestTurnStatus: z.literal('completed'), latestTurnUnchanged: z.literal(true) })]),
+});
 const vmConfigSchema = z.object({ workerUrl: z.url().startsWith('https://'), relayToken: z.string().min(32), tunnelId: z.string().regex(/^[a-f0-9]{32}$/), transport: z.literal('websocket') }).strict();
 const leaseSchema = z.object({ pid: z.number().int().positive(), token: idSchema }).strict();
 const systemError = z.object({ code: z.string() }).passthrough();
-const provider = 'workssh';
+const provider = 'cloudssh';
 
 function hasCode(cause: unknown, code: string) {
   const parsed = systemError.safeParse(cause);
@@ -70,8 +78,13 @@ async function privateText(file: string) {
   return readFile(file, 'utf8');
 }
 
+function sameIdentity(actual: KeepAliveIdentity, expected: KeepAliveIdentity) {
+  return actual.sessionId === expected.sessionId && actual.threadId === expected.threadId
+    && actual.runtimeId === expected.runtimeId && actual.hostKeySha256 === expected.hostKeySha256;
+}
+
 /** Durable controller state is separate from the helper's private provisioning journal. */
-export function createLifecycle(options: WorksshOptions): Lifecycle {
+export function createLifecycle(options: CloudsshOptions): Lifecycle {
   const root = options.stateDirectory;
   const helper = path.join(options.helperRoot, 'tunnel/src/codex-cloud.mjs');
   const proxy = path.join(options.helperRoot, 'tunnel/src/proxy.mjs');
@@ -124,9 +137,9 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
     return records;
   }
 
-  async function acquire(id: string) {
+  async function acquire(id: string, name = '.ssh-lease') {
     await get(id);
-    const lease = path.join(directory(id), '.ssh-lease');
+    const lease = path.join(directory(id), name);
     try { await mkdir(lease, { mode: 0o700 }); }
     catch (cause) {
       if (hasCode(cause, 'EEXIST')) throw failure(`Session is busy or has a stale lease at ${lease}. Inspect owner.json and confirm its PID has ended before manual removal`, 'provider', id);
@@ -156,7 +169,7 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
     throw failure('The recorded helper is still running; no lock was removed', 'outcome_unknown', id);
   }
 
-  async function invoke(id: string, action: 'up' | 'resume' | 'down', extra: string[], signal?: AbortSignal) {
+  async function invoke<T>(id: string, action: 'up' | 'resume' | 'down' | 'keepalive', extra: string[], schema: z.ZodType<T>, signal?: AbortSignal) {
     if (signal?.aborted) throw failure('Operation was aborted before helper start', 'aborted', id);
     // Up must create this directory itself. Precreating it makes the helper refuse creation.
     if (action !== 'up') await privateDirectory(sessionDirectory(id));
@@ -197,7 +210,7 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
         const code = stderr.includes('Included Codex allowance is exhausted') ? 'quota' : action === 'down' ? 'provider' : 'outcome_unknown';
         throw failure(`Helper ${action} did not complete${stderr.trim() ? `: ${stderr.trim()}` : ''}`, code, id, outcome.value.cause);
       }
-      try { return outputSchema.parse(JSON.parse(stdout)); }
+      try { return schema.parse(JSON.parse(stdout)); }
       catch (cause) { throw failure('Helper returned no valid completion record; inspect its journal', 'outcome_unknown', id, cause); }
     } finally {
       clearTimeout(timer);
@@ -216,28 +229,39 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
     if (options.accountId) args.push('--account-id', options.accountId);
     return args;
   }
+  async function identity(id: string): Promise<KeepAliveIdentity> {
+    const saved = nativeSessionSchema.parse(await session(id));
+    const vm = saved.vms[0];
+    return { sessionId: saved.id, threadId: vm.threadId, runtimeId: vm.runtimeId,
+      hostKeySha256: createHash('sha256').update(vm.hostPublicKey.trim().split(/\s+/).slice(0, 2).join(' ')).digest('hex') };
+  }
+  const maintenance = createKeepAlive(options, { get, identity });
 
   return {
     async create(input: CreateInput) {
       if (input.signal?.aborted) throw failure('Create was aborted before state was written', 'aborted');
-      if (input.size !== undefined || input.from !== undefined || input.ports !== undefined || input.idleTimeoutMs !== undefined || (input.network !== undefined && input.network !== 'all')) throw failure('WorkSSH does not support resizing, snapshots, ports, idle expiry or restrictive network policy', 'unsupported');
+      if (input.size !== undefined || input.from !== undefined || input.ports !== undefined || input.idleTimeoutMs !== undefined || (input.network !== undefined && input.network !== 'all')) throw failure('CloudSSH does not support resizing, snapshots, ports, idle expiry or restrictive network policy', 'unsupported');
       const timeoutMs = accessTimeout(input.timeoutMs ?? 600_000);
       const env = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).parse(input.env ?? {});
       const labels = z.record(z.string(), z.string()).parse(input.labels);
       if (input.key !== undefined) z.string().min(1).parse(input.key);
+      const preference = labels['cloudssh.keepAlive'];
+      const keepAlive = preference === undefined ? options.keepAlive === true : z.enum(['true', 'false']).parse(preference) === 'true';
+      if (keepAlive) await maintenance.prepare();
       await privateDirectory(root, true);
-      const record: SandboxRecord = { version: 1, id: randomBytes(16).toString('hex'), key: input.key, labels, env, createdAt: Date.now(), timeoutMs, phase: 'creating' };
+      const record: SandboxRecord = { version: 1, id: randomBytes(16).toString('hex'), key: input.key, labels, env, createdAt: Date.now(), timeoutMs, phase: 'creating', keepAlive };
       await mkdir(directory(record.id), { mode: 0o700 });
       await save(record);
       const release = await acquire(record.id);
       try {
         const args = [...helperCredentials(), '--count', '1', '--agent-deadline', String(record.createdAt + timeoutMs), '--model', options.model ?? 'gpt-6-luna'];
         if (options.allowCredits === true) args.push('--allow-credits');
-        const output = await invoke(record.id, 'up', args, input.signal);
+        const output = await invoke(record.id, 'up', args, outputSchema, input.signal);
         const saved = readySessionSchema.safeParse(await session(record.id));
         if (output.phase !== 'ready' || output.vms.length !== 1 || !output.vms[0]?.ready || output.vms[0].offline || !saved.success || Date.parse(saved.data.vms[0].agentDeadline) !== record.createdAt + timeoutMs) throw failure('Helper did not confirm one ready pinned VM with the requested access deadline', 'outcome_unknown', record.id);
         record.phase = 'ready';
         await save(record);
+        if (keepAlive) await maintenance.start(record.id);
         return record;
       } catch (cause) {
         const current = await get(record.id);
@@ -250,17 +274,20 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
       const timeoutMs = accessTimeout(input.timeoutMs);
       if (input.signal?.aborted) throw failure('Resume was aborted before helper start', 'aborted', id);
       const release = await acquire(id);
+      let releaseControl: (() => Promise<void>) | undefined;
       try {
         const record = await get(id);
+        releaseControl = await acquire(id, '.keepalive-control-lease');
         if (record.phase !== 'ready') throw failure(`Cannot resume a ${record.phase} session; inspect its retained state`, 'provider', id);
         const before = readySessionSchema.safeParse(await session(id));
         if (!before.success) throw failure('Session teardown or incomplete setup prevents access recovery', 'provider', id);
         const original = before.data.vms[0];
+        await maintenance.stop(id);
         await clearOwnedDeadLock(id, record);
         const requestedDeadline = Date.now() + timeoutMs;
         const args = [...helperCredentials(), '--agent-deadline', String(requestedDeadline)];
         if (options.allowCredits === true) args.push('--allow-credits');
-        const output = await invoke(id, 'resume', args, input.signal);
+        const output = await invoke(id, 'resume', args, outputSchema, input.signal);
         const saved = readySessionSchema.safeParse(await session(id));
         if (output.phase !== 'ready' || output.vms.length !== 1 || !output.vms[0]?.ready || output.vms[0].offline || !saved.success) throw failure('Recovery did not confirm one ready pinned VM; prior deadline retained', 'outcome_unknown', id);
         const vm = saved.data.vms[0];
@@ -271,8 +298,9 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
         // determines access; creation time, labels and environment stay unchanged.
         record.timeoutMs = deadline - record.createdAt;
         await save(record);
+        if (record.keepAlive) await maintenance.start(id, true);
         return record;
-      } finally { await release(); }
+      } finally { try { await releaseControl?.(); } finally { await release(); } }
     },
     get,
     list,
@@ -291,12 +319,43 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
       return { id, proxyCommand: [process.execPath, proxy, '--config', config], privateKey: Buffer.from(await privateText(path.join(sessionDirectory(id), 'client_key'))), hostPublicKey: vm.hostPublicKey, scratchDirectory: vm.scratch };
     },
     acquire,
+    async keepAlive(id, enabled) {
+      if (enabled === undefined) return maintenance.status(id);
+      const release = await acquire(id, '.keepalive-control-lease');
+      try {
+        const record = await get(id);
+        if (record.phase !== 'ready') throw failure('Keepalive requires a ready box', 'provider', id);
+        if (enabled) {
+          await maintenance.prepare();
+          if (Date.now() >= record.createdAt + record.timeoutMs) throw failure('Keepalive cannot renew expired access; reconnect explicitly first', 'provider', id);
+          await save({ ...record, keepAlive: true });
+          return await maintenance.start(id);
+        }
+        await maintenance.stop(id, true);
+        await save({ ...await get(id), keepAlive: false });
+        return maintenance.status(id);
+      } finally { await release(); }
+    },
+    async maintain(id, expected, signal) {
+      const record = await get(id);
+      if (record.phase !== 'ready' || !record.keepAlive || Date.now() >= record.createdAt + record.timeoutMs) throw failure('Keepalive is disabled or access expired; no native resume requested', 'provider', id);
+      if (!sameIdentity(await identity(id), expected)) throw failure('Keepalive session, thread, runtime or host pin changed; no resume requested', 'provider', id);
+      const before = nativeSessionSchema.parse(await session(id));
+      let output;
+      try { output = await invoke(id, 'keepalive', options.authFile ? ['--auth-file', options.authFile] : [], keepAliveOutputSchema, signal); }
+      catch { throw failure('Native keepalive failed or has an uncertain outcome; no model work or retry was requested. Inspect the helper journal', 'outcome_unknown', id); }
+      if (output.vms[0].threadId !== expected.threadId || output.vms[0].runtimeId !== expected.runtimeId || !sameIdentity(await identity(id), expected)
+        || nativeSessionSchema.parse(await session(id)).vms[0].agentDeadline !== before.vms[0].agentDeadline) throw failure('Native keepalive changed identity or the access deadline; maintenance stopped', 'outcome_unknown', id);
+    },
     async destroy(id) {
       let record = await get(id);
       if (record.phase === 'deleted') return;
       const release = await acquire(id);
+      let releaseControl: (() => Promise<void>) | undefined;
       try {
         record = await get(id);
+        releaseControl = await acquire(id, '.keepalive-control-lease');
+        await maintenance.stop(id, true);
         await clearOwnedDeadLock(id, record);
         let saved: z.infer<typeof sessionSchema>;
         try { saved = await session(id); }
@@ -307,7 +366,7 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
         }
         if (!saved.closed) {
           await save({ ...record, phase: 'deleting' });
-          await invoke(id, 'down', [...helperCredentials(), '--yes']);
+          await invoke(id, 'down', [...helperCredentials(), '--yes'], outputSchema);
           saved = await session(id);
         }
         if (!saved.closed || saved.phase !== 'deleted' || saved.relayToken || saved.vms.some((vm) => !vm.offline) || (saved.configId && !saved.configDeleted) || (saved.vaultId && !saved.vaultDeleted) || (saved.workerOwned && !saved.workerDeleted)) throw failure('Cloud resource deletion or runtime shutdown is not confirmed; state retained', 'outcome_unknown', id);
@@ -315,7 +374,7 @@ export function createLifecycle(options: WorksshOptions): Lifecycle {
       } catch (cause) {
         if (cause instanceof SandboxError) throw cause;
         throw failure('Destroy did not confirm cloud cleanup; state retained for inspection', 'outcome_unknown', id, cause);
-      } finally { await release(); }
+      } finally { try { await releaseControl?.(); } finally { await release(); } }
     },
     sessionDirectory,
   };

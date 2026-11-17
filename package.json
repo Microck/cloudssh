@@ -1,7 +1,7 @@
 {
-  "name": "@microck/sandbox-sdk-workssh",
+  "name": "@microck/sandbox-sdk-cloudssh",
   "version": "0.1.0",
-  "description": "WorkSSH Codex Cloud provider for Sandbox SDK and Raft executable plugins",
+  "description": "CloudSSH Codex Cloud provider for Sandbox SDK and Raft executable plugins",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -14,7 +14,7 @@
     }
   },
   "bin": {
-    "workssh-raft": "dist/raft.js"
+    "cloudssh-raft": "dist/raft.js"
   },
   "files": [
     "dist",

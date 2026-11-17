@@ -1,16 +1,17 @@
 #!/usr/bin/env node
-import { access, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { createSandbox } from '@opencoredev/sandbox-sdk';
-import { workssh } from './index.js';
+import { cloudssh } from './index.js';
 import { createLifecycle } from './lifecycle.js';
-import { worksshOptionsSchema } from './contracts.js';
+import { cloudsshOptionsSchema } from './contracts.js';
 import { hostOperations } from './host.js';
 import { jobOperations, retainedStatus, retainedLogs } from './jobs.js';
 import type { Labels } from '@opencoredev/sandbox-sdk/provider';
-import type { SandboxRecord, Lifecycle, WorksshOptions } from './contracts.js';
-import type { WorksshProvider } from './index.js';
+import type { SandboxRecord, Lifecycle, CloudsshOptions } from './contracts.js';
+import type { CloudsshProvider } from './index.js';
 import type { GuestUsage } from './host.js';
 import type { JobStatus } from './jobs.js';
 
@@ -61,7 +62,7 @@ function json<T>(value: T) { process.stdout.write(`${JSON.stringify(value)}\n`);
 
 async function atomicDownload(destination: string, bytes: Uint8Array) {
   const target = resolve(destination);
-  const staging = await mkdtemp(join(dirname(target), '.workssh-download-'));
+  const staging = await mkdtemp(join(dirname(target), '.cloudssh-download-'));
   try {
     const file = join(staging, 'file');
     await writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
@@ -92,8 +93,8 @@ interface ProbeResult {
   resources: GuestUsage | null;
 }
 interface Environment {
-  options: WorksshOptions;
-  provider: WorksshProvider;
+  options: CloudsshOptions;
+  provider: CloudsshProvider;
   lifecycle: Lifecycle;
   expected: Labels;
   qualified(id: string): string;
@@ -104,8 +105,8 @@ interface Environment {
 }
 
 function environment(request: Request): Environment {
-  const options = worksshOptionsSchema.parse(request.options);
-  const provider = workssh(options);
+  const options = cloudsshOptionsSchema.parse(request.options);
+  const provider = cloudssh(options);
   const lifecycle = createLifecycle(options);
   const expected: Labels = { 'sandbox-sdk': '1', 'raft.location': request.location };
   const qualified = (id: string) => `${request.location}:${idSchema.parse(id)}`;
@@ -135,7 +136,7 @@ function environment(request: Request): Environment {
 async function report(action: Action, context: Environment, location: string) {
   const records = await context.records();
   if (action === 'capacity') {
-    json({ location, provider: 'workssh', notice: 'No configured local VM-count limit; provider capacity and account quota are unknown.',
+    json({ location, provider: 'cloudssh', notice: 'No configured local VM-count limit; provider capacity and account quota are unknown.',
       localLimit: null, providerLimit: null, available: null, host: null, boxes: records.length,
       activeBoxes: null, allocated: null, reserve: null, headroom: null, estimates: [],
       warnings: ['No allocation or quota guarantee. Per-VM resources are measured by info or usage.'] });
@@ -161,7 +162,7 @@ async function report(action: Action, context: Environment, location: string) {
     if (observed.health.status !== 'reachable') unhealthy = true;
     if (action === 'list') {
       json({ box: context.qualified(record.id), state: observed.health.status === 'reachable' ? 'Running' : 'Unknown',
-        stopAt: '', deleteAt: '', disk: null, note: note(record.labels), phase: record.phase, ...observed });
+        stopAt: '', deleteAt: '', disk: null, note: note(record.labels), phase: record.phase, keepAlive: await context.lifecycle.keepAlive(record.id), ...observed });
     } else json({ box: context.qualified(record.id), ...observed });
   }
   if (action === 'doctor' && records.length === 0) json({ location, status: 'configured', boxes: 0, notice: 'Helper found. No live VM was available to probe; account credentials and allowance were not tested.' });
@@ -192,8 +193,8 @@ async function operate(action: Action, request: Request, context: Environment, s
     if (action === 'destroy') { await context.provider.destroy(record.id); return 0; }
     if (record.phase === 'deleted') throw new Error('Sandbox has been deleted');
     if (action === 'info') {
-      json({ box: context.qualified(record.id), id: record.id, provider: 'workssh', phase: record.phase, labels: record.labels,
-        createdAt: record.createdAt, agentExpiresAt: record.createdAt + record.timeoutMs, commands: [...commands], ...await context.probe(record) });
+      json({ box: context.qualified(record.id), id: record.id, provider: 'cloudssh', phase: record.phase, labels: record.labels,
+        createdAt: record.createdAt, agentExpiresAt: record.createdAt + record.timeoutMs, commands: [...commands], keepAlive: await context.lifecycle.keepAlive(record.id), ...await context.probe(record) });
       return 0;
     }
     if (signal.aborted) throw signal.reason;
@@ -264,11 +265,32 @@ async function dispatch(action: Action, request: Request, signal: AbortSignal) {
   return operate(action, request, context, signal);
 }
 
+/** Management stays outside Raft protocol 1, whose core owns its command vocabulary. */
+async function manageKeepAlive() {
+  const parsed = parseArgs({ args: process.argv.slice(3), allowPositionals: true,
+    options: { options: { type: 'string' }, enable: { type: 'boolean' }, disable: { type: 'boolean' } } });
+  if (parsed.positionals.length !== 1 || parsed.values.enable && parsed.values.disable) throw new Error('Use keepalive LOCATION:ID --options FILE [--enable|--disable]');
+  const box = z.string().parse(parsed.positionals[0]);
+  const location = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/).parse(box.split(':')[0]);
+  const id = nativeId(box, location);
+  const file = z.string().refine(value => value.startsWith('/'), 'Options file must be absolute').parse(parsed.values.options);
+  const metadata = await lstat(file);
+  if (!metadata.isFile() || metadata.mode & 0o077) throw new Error('Options must be a private regular JSON file');
+  const options = cloudsshOptionsSchema.parse(JSON.parse(await readFile(file, 'utf8')));
+  const lifecycle = createLifecycle(options);
+  const record = await lifecycle.get(id);
+  if (!owns(record, { 'sandbox-sdk': '1', 'raft.location': location })) throw new Error('Sandbox belongs to another Raft location');
+  const enabled = parsed.values.enable ? true : parsed.values.disable ? false : undefined;
+  json({ box, keepAlive: await lifecycle.keepAlive(id, enabled) });
+  return 0;
+}
+
 async function main() {
   if (process.argv.includes('--help')) {
-    process.stdout.write('WorkSSH Raft protocol 1 plugin. Register: raft plugin add openai -- node /absolute/path/to/dist/raft.js\nHost operations: SSH, exec/detached jobs, transfers, health, usage, capacity and explicit expired-session gc. See README.md.\n');
+    process.stdout.write('CloudSSH Raft protocol 1 plugin. Register: raft plugin add cloudssh -- node /absolute/path/to/dist/raft.js\nHost operations: SSH, exec/detached jobs, transfers, health, usage, capacity and explicit expired-session gc.\nKeepalive: cloudssh-raft keepalive LOCATION:ID --options /private/options.json [--enable|--disable]. See README.md.\n');
     return 0;
   }
+  if (process.argv[2] === 'keepalive') return manageKeepAlive();
   const request = requestSchema.parse(JSON.parse(process.env.RAFT_PLUGIN_REQUEST ?? 'null'));
   if (process.argv.at(-1) === 'describe') { json({ protocol: 1, commands: [...commands] }); return 0; }
   const action = actionSchema.parse(process.argv.at(-1));
@@ -302,6 +324,6 @@ try {
     return flushed.promise;
   }));
 } catch (cause) {
-  process.stderr.write(`workssh-raft: ${cause instanceof z.ZodError ? 'Invalid plugin request or unsupported option value' : message(cause)}\n`);
+  process.stderr.write(`cloudssh-raft: ${cause instanceof z.ZodError ? 'Invalid plugin request or unsupported option value' : message(cause)}\n`);
   process.exitCode ??= 1;
 }

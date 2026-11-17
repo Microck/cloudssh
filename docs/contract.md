@@ -1,4 +1,4 @@
-# WorkSSH provider contract
+# CloudSSH provider contract
 
 This package implements the published @opencoredev/sandbox-sdk 1.0.3 Provider interface and merged Raft executable plugin protocol 1, inspected at 954b5ae499324144f35362c589d2264f872e617a.
 
@@ -13,6 +13,17 @@ Create rejects unsupported resizing, non-all networking policy, ports, snapshots
 Only disposable cloud sessions are supported. Create timeoutMs defaults to 600000 and accepts integer milliseconds from 60000 through 2592000000, matching Raft's 30-day bound. This is a caller-authorized access window, not a provider uptime, VM deletion or billing guarantee. Creation and the helper share the exact absolute deadline, including provisioning time. The platform can reclaim the VM earlier. No controller timer guarantees remote VM deletion after the caller exits. Explicit destroy invokes helper down, which must confirm owned resource deletion and offline runtime. close detaches SSH, not the cloud VM. There is no pause, snapshot, terminal resize, preview or size capability. Key lookup is best-effort within one controller state directory. It does not promise cross-controller uniqueness.
 
 Expired access is not a missing sandbox and never authorizes replacement. Explicit provider.reconnect(id, { timeoutMs, signal }) or raft resume BOX --ttl SECONDS requests another bounded SSH agent on the same runtime with the same host pin. It requires normal task approval and allowance checks. It does not restart the VM, change its creation identity or labels, or renew access during exec. A still-running agent keeps its existing deadline; the adapter records the actual confirmed deadline, not the requested one. Failed or uncertain recovery leaves the prior access deadline unchanged and never retries a mutation. Busy leases and deleted or partially deleted sessions block recovery.
+
+### Resume-only keepalive
+
+`keepAlive: true` in provider or Raft location options enables native resume-only maintenance by default for newly created boxes. The default remains false. The per-create `cloudssh.keepAlive` label accepts exactly `"true"` or `"false"` and overrides that default. `provider.keepAlive(id, enabled)` and the executable's `keepalive` management command change an existing box explicitly; reading its status never enables maintenance.
+
+Maintenance uses a task-owned Linux user-systemd service, independent of the SDK or CLI process. Enabling requires a reachable user manager and an installed helper advertising its native `keepalive` command; unsupported controllers fail before allocation. The service starts with a native resume, then resumes every two hours within the existing access deadline. It does not call model-assisted `resume`, start turns, consume a configured paid-credit fallback, reinstall SSH, extend expiry or allocate replacements.
+
+Each attempt records an issued marker before sending the request, checks the original helper session/thread/runtime/host pin and unchanged completed latest turn, and stops on error or uncertain outcome without retry. SSH health uses the normal exclusive client lease; an already attached client is reported as busy rather than displaced. Other SSH errors stop maintenance. Explicit recovery and destroy stop the owned worker before helper mutation; successful explicit recovery can start maintenance again within its confirmed access window.
+
+Expiry stops the service, not the cloud VM. Destroy still requires confirmed helper deletion. Closing the SDK handle leaves maintenance running. The controller host and its user manager must stay available; no host-reboot, user-manager restart, indefinite uptime or already-suspended-guest recovery guarantee is made. Status distinguishes requested maintenance, last observed success, failed/expired/stopped maintenance and current manager state. Credentials stay in existing auth stores; service arguments contain only the controller registry and box identity.
+
 
 ## Exec and files
 

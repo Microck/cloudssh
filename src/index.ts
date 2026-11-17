@@ -6,18 +6,19 @@ import { join } from 'node:path';
 import { jobOperations, interruptRetained } from './jobs.js';
 import { createLifecycle } from './lifecycle.js';
 import { createTransport } from './ssh.js';
-import { worksshOptionsSchema } from './contracts.js';
-import type { GuestTransport, ReconnectInput, SandboxRecord, WorksshNative, WorksshOptions } from './contracts.js';
+import { cloudsshOptionsSchema } from './contracts.js';
+import type { GuestTransport, KeepAliveStatus, ReconnectInput, SandboxRecord, CloudsshNative, CloudsshOptions } from './contracts.js';
 
-export type { WorksshOptions, WorksshNative, ReconnectInput } from './contracts.js';
+export type { CloudsshOptions, CloudsshNative, ReconnectInput, KeepAliveStatus } from './contracts.js';
 
-export type WorksshProvider = Provider<WorksshNative, never> & {
+export type CloudsshProvider = Provider<CloudsshNative, never> & {
   guest(id: string): Promise<GuestTransport>;
   close(id: string): Promise<void>;
   reconnect(id: string, input: ReconnectInput): Promise<SandboxInfo>;
+  keepAlive(id: string, enabled?: boolean): Promise<KeepAliveStatus>;
 };
 
-const name = 'workssh';
+const name = 'cloudssh';
 
 function failure(message: string, code: 'not_found' | 'unsupported' | 'outcome_unknown' | 'provider', id?: string) {
   return new SandboxError(message, { code, provider: name, sandboxId: id });
@@ -33,13 +34,13 @@ function usable(record: SandboxRecord) {
 }
 
 /** One provider owns a private controller registry and lazily attached SSH transports. */
-export function workssh(options: WorksshOptions): WorksshProvider {
-  let settings: WorksshOptions;
+export function cloudssh(options: CloudsshOptions): CloudsshProvider {
+  let settings: CloudsshOptions;
   try {
-    settings = worksshOptionsSchema.parse(options);
+    settings = cloudsshOptionsSchema.parse(options);
   } catch (cause) {
     if (!(cause instanceof z.ZodError)) throw cause;
-    throw new SandboxError('Invalid WorkSSH options. Use absolute helperRoot and stateDirectory paths and only documented options', {
+    throw new SandboxError('Invalid CloudSSH options. Use absolute helperRoot and stateDirectory paths and only documented options', {
       code: 'invalid_argument', provider: name,
     });
   }
@@ -126,6 +127,7 @@ export function workssh(options: WorksshOptions): WorksshProvider {
       await close(id);
       return remember(await lifecycle.resume(id, input));
     },
+    keepAlive: lifecycle.keepAlive,
     async find(key) {
       const record = await lifecycle.find(key);
       if (!record) return undefined;
@@ -184,7 +186,7 @@ export function workssh(options: WorksshOptions): WorksshProvider {
       async mkdir(id, path) { await (await guest(id)).files.mkdir(path); },
     },
     async previewUrl(id) {
-      throw failure('WorkSSH does not expose authenticated HTTP previews or SSH forwarding', 'unsupported', id);
+      throw failure('CloudSSH does not expose authenticated HTTP previews or SSH forwarding', 'unsupported', id);
     },
     native(id) {
       const record = records.get(id);
@@ -196,4 +198,4 @@ export function workssh(options: WorksshOptions): WorksshProvider {
   };
 }
 
-export default workssh;
+export default cloudssh;

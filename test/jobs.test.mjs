@@ -9,7 +9,7 @@ import { createTransport } from '../dist/ssh.js';
 import { startSshd } from './fixtures/sshd.mjs';
 
 async function setup(t) {
-  const root = await mkdtemp(join(tmpdir(), 'workssh-jobs-'));
+  const root = await mkdtemp(join(tmpdir(), 'cloudssh-jobs-'));
   const server = await startSshd({ directory: join(root, 'sshd') });
   const access = { id: 'fixture', proxyCommand: [process.execPath, new URL('./fixtures/proxy.mjs', import.meta.url).pathname, String(server.port)],
     privateKey: server.privateKey, hostPublicKey: server.hostPublicKey, scratchDirectory: join(root, 'remote-scratch') };

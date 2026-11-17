@@ -14,7 +14,7 @@ const entry = fileURLToPath(new URL('../dist/raft.js', import.meta.url));
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
 async function setup(t) {
-  const root = await mkdtemp(join(tmpdir(), 'workssh-raft-integration-'));
+  const root = await mkdtemp(join(tmpdir(), 'cloudssh-raft-integration-'));
   const home = join(root, 'home');
   await mkdir(home, { mode: 0o700 });
   const server = await startSshd({ directory: join(root, 'sshd') });

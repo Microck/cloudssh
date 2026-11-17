@@ -18,7 +18,7 @@ function invoke(action, request, home) {
 }
 
 test('protocol handshake works without credentials or configured helper and makes no state', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workssh-protocol-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudssh-protocol-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const result = invoke('describe', { protocol: 1, location: 'work', options: {}, args: {} }, home);
   assert.equal(result.status, 0, result.stderr);
@@ -27,7 +27,7 @@ test('protocol handshake works without credentials or configured helper and make
 });
 
 test('unsupported actions and unsafe creation flags fail before touching provider state', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workssh-refusal-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudssh-refusal-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const stateDirectory = path.join(home, 'provider-state');
   const options = { helperRoot: path.join(home, 'not-installed'), stateDirectory };
@@ -48,7 +48,7 @@ test('unsupported actions and unsafe creation flags fail before touching provide
 });
 
 test('wrong protocol versions and action/location mismatches cannot execute', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workssh-invalid-protocol-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudssh-invalid-protocol-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const rows = [
     { protocol: 2, location: 'work', options: {}, args: {} },
@@ -63,7 +63,7 @@ test('wrong protocol versions and action/location mismatches cannot execute', (t
 });
 
 test('capacity distinguishes absent local limits from unknown provider availability without allocating', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'workssh-capacity-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudssh-capacity-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const stateDirectory = path.join(home, 'state');
   const result = invoke('capacity', { protocol: 1, location: 'openai', options: { helperRoot: path.join(home, 'missing-helper'), stateDirectory }, args: { action: 'capacity', location: 'openai', json: true } }, home);

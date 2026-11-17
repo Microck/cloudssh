@@ -10,7 +10,7 @@ const { Server, utils } = ssh2;
 
 /** Real SSH public-key authentication and exec channels, backed only by owned guest subprocesses. */
 export async function startSshd({ directory } = {}) {
-  const root = directory ?? await mkdtemp(join(tmpdir(), 'workssh-sshd-'));
+  const root = directory ?? await mkdtemp(join(tmpdir(), 'cloudssh-sshd-'));
   await mkdir(root, { recursive: true, mode: 0o700 });
   const host = join(root, 'host_ed25519');
   const identity = join(root, 'client_ed25519');

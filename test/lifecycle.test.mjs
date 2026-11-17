@@ -8,7 +8,7 @@ import { createLifecycle } from '../dist/lifecycle.js';
 import { createFixtureHelper } from './fixtures/helper.mjs';
 
 async function setup(t, mode = 'ready') {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'workssh-lifecycle-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cloudssh-lifecycle-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const options = { helperRoot: path.join(root, 'helper'), stateDirectory: path.join(root, 'state') };
   await createFixtureHelper(options.helperRoot, { mode });

@@ -6,7 +6,7 @@ import type { CreateInput, ExecInput, ExecResult, FileInfo, Labels, WriteOptions
 /** Credentials are file paths only; the helper reads its existing auth without changing it. */
 const absolutePath = z.string().min(1).refine(isAbsolute, 'Expected an absolute path');
 
-export const worksshOptionsSchema = z.object({
+export const cloudsshOptionsSchema = z.object({
   helperRoot: absolutePath,
   stateDirectory: absolutePath,
   authFile: absolutePath.optional(),
@@ -14,16 +14,36 @@ export const worksshOptionsSchema = z.object({
   accountId: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   allowCredits: z.boolean().optional(),
+  keepAlive: z.boolean().optional(),
   operationTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
 }).strict();
 
-export type WorksshOptions = z.infer<typeof worksshOptionsSchema>;
+export type CloudsshOptions = z.infer<typeof cloudsshOptionsSchema>;
 
 /** Caller-authorized access window; matches Raft's 60-second to 30-day range. */
 export const accessTimeoutSchema = z.number().int().min(60_000).max(2_592_000_000);
 export interface ReconnectInput {
   timeoutMs: number;
   signal?: AbortSignal;
+}
+
+export interface KeepAliveIdentity {
+  sessionId: string;
+  threadId: string;
+  runtimeId: string;
+  hostKeySha256: string;
+}
+
+export interface KeepAliveStatus {
+  enabled: boolean;
+  state: 'disabled' | 'scheduled' | 'running' | 'stopped' | 'expired' | 'failed';
+  intervalMs: number;
+  nextAt?: number;
+  lastAttemptAt?: number;
+  lastSuccessAt?: number;
+  lastError?: string;
+  ssh?: 'verified' | 'busy';
+  managerState?: string;
 }
 
 export interface SandboxRecord {
@@ -36,6 +56,7 @@ export interface SandboxRecord {
   timeoutMs: number;
   phase: 'creating' | 'ready' | 'failed' | 'deleting' | 'deleted';
   helperPid?: number;
+  keepAlive?: boolean;
 }
 
 /** One SSH connection multiplexes command/control channels. The relay allows one client per tunnel. */
@@ -47,7 +68,7 @@ export interface SshAccess {
   scratchDirectory: string;
 }
 
-export interface WorksshNative {
+export interface CloudsshNative {
   id: string;
   sessionDirectory: string;
   phase: SandboxRecord['phase'];
@@ -63,6 +84,8 @@ export interface Lifecycle {
   access(id: string): Promise<SshAccess>;
   acquire(id: string): Promise<() => Promise<void>>;
   sessionDirectory(id: string): string;
+  keepAlive(id: string, enabled?: boolean): Promise<KeepAliveStatus>;
+  maintain(id: string, expected: KeepAliveIdentity, signal?: AbortSignal): Promise<void>;
 }
 
 export interface RemoteFiles {

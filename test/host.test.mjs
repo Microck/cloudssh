@@ -29,7 +29,7 @@ async function pack(source, archive) {
 }
 
 test('tree archive round-trip preserves hardlinks, executable modes, empty directories, and safe symlinks', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'workssh-host-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cloudssh-host-'));
   const source = path.join(root, 'source');
   const destination = path.join(root, 'destination');
   const archive = path.join(root, 'tree.tar');
@@ -51,7 +51,7 @@ test('tree archive round-trip preserves hardlinks, executable modes, empty direc
 });
 
 test('tree unpack rejects escaping links and does not publish partial output', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'workssh-host-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cloudssh-host-'));
   const archive = path.join(root, 'unsafe.tar');
   const destination = path.join(root, 'destination');
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -65,7 +65,7 @@ test('tree unpack rejects escaping links and does not publish partial output', a
 });
 
 test('archive traversal, absolute paths, escaping hardlinks and special files never publish or alter outside files', async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'workssh-unsafe-tree-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cloudssh-unsafe-tree-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const outside = path.join(root, 'outside');
   await writeFile(outside, 'outside guard');
@@ -89,7 +89,7 @@ test('archive traversal, absolute paths, escaping hardlinks and special files ne
 });
 
 test('recursive publication refuses existing directories and symlinks without changing their contents', async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'workssh-tree-no-overwrite-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cloudssh-tree-no-overwrite-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = path.join(root, 'source'), destination = path.join(root, 'destination'), alias = path.join(root, 'alias'), archive = path.join(root, 'tree.tar');
   await mkdir(source); await writeFile(path.join(source, 'new'), 'new data');

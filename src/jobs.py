@@ -188,7 +188,7 @@ def main():
     scratch = request["scratch"]
     if not isinstance(scratch, str) or not scratch.startswith("/") or "\0" in scratch:
         raise ValueError("invalid scratch directory")
-    root = os.path.join(scratch, ".workssh-jobs")
+    root = os.path.join(scratch, ".cloudssh-jobs")
     private_directory(root, create=operation == "start")
     directory = os.path.join(root, job)
     if operation == "start":

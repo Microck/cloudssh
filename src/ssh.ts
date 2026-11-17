@@ -14,7 +14,7 @@ import type { GuestTransport, RemoteFiles, ShellInput, SshAccess } from './contr
 const { Client, utils } = ssh2;
 
 
-const provider = 'workssh';
+const provider = 'cloudssh';
 const maxFileBytes = 32 * 1024 * 1024;
 const maxLineBytes = 96 * 1024 * 1024;
 const fileInfo = z.object({ path: z.string(), type: z.enum(['file', 'directory', 'symlink']), size: z.number().nonnegative(), modifiedAt: z.number() });

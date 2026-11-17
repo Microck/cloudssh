@@ -135,7 +135,7 @@ def unpack_directory(stream, destination, expected_size=None):
     destination = destination.parent.resolve(strict=True) / destination.name
     if os.path.lexists(destination):
         raise FileExistsError("Recursive destination already exists: " + str(destination))
-    staged = Path(tempfile.mkdtemp(dir=destination.parent, prefix=".workssh-tree-"))
+    staged = Path(tempfile.mkdtemp(dir=destination.parent, prefix=".cloudssh-tree-"))
     try:
         reader = stream if isinstance(stream, (TransferReader, ChunkReader)) else TransferReader(stream)
         with tarfile.open(fileobj=reader, mode="r|") as archive:

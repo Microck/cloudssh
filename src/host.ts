@@ -65,8 +65,8 @@ export function hostOperations(guest: GuestTransport) {
   return {
     async usage(): Promise<GuestUsage> { return usageSchema.parse(JSON.parse(await remote(['usage']))); },
     async uploadTree(input: string, destination: string) {
-      const local = await mkdtemp(join(tmpdir(), 'workssh-upload-'));
-      const stage = `${guest.scratchDirectory}/.workssh-transfer-${randomBytes(16).toString('hex')}`;
+      const local = await mkdtemp(join(tmpdir(), 'cloudssh-upload-'));
+      const stage = `${guest.scratchDirectory}/.cloudssh-transfer-${randomBytes(16).toString('hex')}`;
       let prepared = false;
       try {
         const archive = join(local, 'tree.tar');
@@ -83,8 +83,8 @@ export function hostOperations(guest: GuestTransport) {
       }
     },
     async downloadTree(input: string, destination: string) {
-      const local = await mkdtemp(join(tmpdir(), 'workssh-download-'));
-      const stage = `${guest.scratchDirectory}/.workssh-transfer-${randomBytes(16).toString('hex')}`;
+      const local = await mkdtemp(join(tmpdir(), 'cloudssh-download-'));
+      const stage = `${guest.scratchDirectory}/.cloudssh-transfer-${randomBytes(16).toString('hex')}`;
       let prepared = false;
       try {
         await remote(['prepare', stage]); prepared = true;
