@@ -14,8 +14,8 @@ This package drives the installed [WorkSSH cloud helper](https://github.com/Micr
 - For the Raft entry point, a Raft version containing merged executable plugin protocol 1. Raft 0.7 and 0.8 do not contain it; use a release with `raft plugin` or a pinned merged-source installation.
 
 ```sh
-git clone https://github.com/Microck/sandbox-sdk-workssh.git sandbox-sdk-cloudssh
-cd sandbox-sdk-cloudssh
+git clone https://github.com/Microck/cloudssh.git
+cd cloudssh
 npm ci
 npm run build
 ```
@@ -107,7 +107,7 @@ The worker stops at the existing access deadline, on identity/host-pin changes, 
 Register the compiled entry point:
 
 ```sh
-raft plugin add cloudssh -- node /absolute/path/to/sandbox-sdk-cloudssh/dist/raft.js
+raft plugin add cloudssh -- node /absolute/path/to/cloudssh/dist/raft.js
 ```
 
 Set that location's `options` in `~/.config/raft/incus.json`. Preserve all other locations:
@@ -115,7 +115,7 @@ Set that location's `options` in `~/.config/raft/incus.json`. Preserve all other
 ```json
 {
   "cloudssh": {
-    "plugin": ["/absolute/path/to/node", "/absolute/path/to/sandbox-sdk-cloudssh/dist/raft.js"],
+    "plugin": ["/absolute/path/to/node", "/absolute/path/to/cloudssh/dist/raft.js"],
     "options": {
       "helperRoot": "/absolute/path/to/workssh-relay",
       "stateDirectory": "/absolute/private/path/to/cloudssh-sandboxes",

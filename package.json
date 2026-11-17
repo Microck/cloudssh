@@ -1,7 +1,7 @@
 {
   "name": "@microck/sandbox-sdk-cloudssh",
   "version": "0.1.0",
-  "description": "CloudSSH Codex Cloud provider for Sandbox SDK and Raft executable plugins",
+  "description": "Codex Cloud workspaces over SSH, with a Sandbox SDK provider, Raft plugin, and native resume-only keepalive.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -46,6 +46,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Microck/sandbox-sdk-workssh.git"
+    "url": "git+https://github.com/Microck/cloudssh.git"
   }
 }
